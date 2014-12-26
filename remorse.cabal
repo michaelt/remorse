@@ -12,7 +12,8 @@ build-type:          Simple
 cabal-version:       >=1.10
 
 library
-  exposed-modules:     Remorse.Sequence, Remorse.Free, Remorse.Internal, Remorse.Prelude
+  exposed-modules:     Remorse.Free, Remorse.Sequence, Remorse.Prelude, Remorse.Internal
+                       
   other-extensions:    TupleSections, GADTs, ViewPatterns, TypeOperators, TypeSynonymInstances, FlexibleInstances, ExistentialQuantification, BangPatterns, DeriveFunctor, GeneralizedNewtypeDeriving, LambdaCase, RankNTypes, ScopedTypeVariables, TypeFamilies
   build-depends:       base >=4.6 && <4.8
                        , mtl >=2.1 && <2.3

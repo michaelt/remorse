@@ -9,7 +9,10 @@
 module Remorse.Internal where
 import Remorse.Sequence
 import Control.Arrow (Kleisli (..))
-
+import Data.Foldable (Foldable (..))
+import Control.Applicative hiding (empty)
+import Data.Traversable
+import Data.Monoid
 data RTQueue tc a b where
   RQ :: !(Cons tc a b) -> !(Snoc tc b c) -> !(Cons tc x b) -> RTQueue tc a c
 
@@ -76,6 +79,41 @@ instance Maps Queue where
 
 
 
+data AsUnitLoop a b c where 
+     UL :: !a -> AsUnitLoop a () ()
+
+newtype MSeq s a = MSeq { getMS :: s (AsUnitLoop a) () () }
+
+instance Sequence s => Sequential (MSeq s) where
+  empty      = MSeq blank
+  single  = MSeq . singleton . UL
+  l .>< r    = MSeq $ getMS l >< getMS r
+  l .|> x    = MSeq $ getMS l |> UL x
+  x .<| r    = MSeq $ UL x <| getMS r
+  viewl  s   = case uncons (getMS s) of
+         Empty    -> EmptyL
+         UL h :| t -> h :< MSeq t
+  viewr  s   = case unsnoc (getMS s) of
+         NoSnoc      -> EmptyR
+         p :|< UL l -> MSeq p :>> l
+
+instance Sequence s => Functor (MSeq s) where
+    fmap f = map where
+     map q = case viewl q of
+       EmptyL -> empty
+       h :< t -> f h .<| map t 
+  
+instance Sequence s => Foldable (MSeq s) where
+    foldMap f = fm where
+     fm q = case viewl q of
+       EmptyL -> mempty
+       h :< t -> f h `mappend` fm t 
+  
+  
+instance Sequence s => Traversable (MSeq s) where
+    sequenceA q = case viewl q of
+       EmptyL -> pure empty
+       h :< t -> pure (.<|) <*> h <*> sequenceA t
 
 
 -- data CTQueue q c x y where

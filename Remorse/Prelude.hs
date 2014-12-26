@@ -1,9 +1,11 @@
 {-# LANGUAGE RankNTypes, ScopedTypeVariables, BangPatterns, DeriveFunctor #-}
+{-# LANGUAGE GADTs #-}
 
 module Remorse.Prelude where
 
 import Remorse.Free
 import Remorse.Sequence
+import Control.Monad hiding (mapM)
 import Control.Monad.Trans
 import Prelude hiding (map, filter, drop, take, sum
                       , iterate, repeat, replicate, splitAt
@@ -30,23 +32,31 @@ for free f = prefor (\(a :> x) -> f a >> return x) free
 -- ---------------
 sum :: (Monad m) => FreeT (Of Int) m () -> m Int
 sum = loop 0 where
-  loop !n free = do 
+  loop n free = do 
     step <- next free
     case step of 
-      Stop _ -> return n
-      Step (a :> rest) -> loop (n+a) rest
+      Stop _ -> return $! n
+      Step (a :> rest) -> let s = n + a in s `seq` loop (n+a) rest
 {-# INLINABLE sum #-}
 
+--
+sum_ :: (Monad m) => FreeT (Of Int) m () -> m Int
+sum_ d = fold (\(a :> f) -> f >=> return . (+a) )
+            (\mf n -> mf >>= \f -> f n)
+            (\() m -> return m)
+            d
+            0
+{-# INLINABLE sum_ #-}
 
 -- ---------------
 -- replicate 
 -- ---------------
 
-replicate :: Monad m => Int -> a -> FreeT (Of a) m ()
-replicate n a = loop n where
-  loop 0 = return ()
-  loop m = do yield a
-              loop (m-1)
+replicate :: (Monad m) => Int -> a -> FreeT (Of a) m ()
+replicate n  = take n . repeat -- loop n where
+  -- loop 0 = return ()
+  -- loop m = do yield a
+  --             loop (m-1)
 {-# INLINABLE replicate #-}
 
 
@@ -92,7 +102,7 @@ repeat a = yield a >> repeat a
 {-# INLINABLE repeat #-}
 
 repeatM :: Monad m => m a -> FreeT (Of a) m r
-repeatM ma = do a <- lift ma
+repeatM ma = do a <- lift ma 
                 yield a
                 repeatM ma
 {-# INLINABLE repeatM #-}
@@ -103,11 +113,10 @@ repeatM ma = do a <- lift ma
 
 filter :: Monad m => (a -> Bool) -> FreeT (Of a) m r -> FreeT (Of a) m r
 filter pred = loop where
-  loop p = do n <- lift $ next p
+  loop p = do n <- lift (next p)
               case n of Stop r -> return r
-                        Step (a :> p') -> if pred a 
-                                             then yield a >> loop p'
-                                             else loop p'
+                        Step (a :> p') -> do when (pred a) (yield a )
+                                             loop p'
 {-# INLINABLE filter #-}
 
 
@@ -131,7 +140,7 @@ drop :: Monad m => Int -> FreeT (Of a) m r -> FreeT (Of a) m r
 drop  = loop  where
   loop 0 p = p
   loop m p = do 
-    step <- lift $ next p
+    step <- lift (next p)
     case step of 
       Stop r -> return r
       Step (a :> p') -> loop (m-1) p'

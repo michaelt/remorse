@@ -7,6 +7,7 @@ import Control.Monad
 import Control.Applicative
 import Control.Arrow (Kleisli(..))
 import Control.Monad.Trans 
+import Control.Monad.Morph
 
 data FreeT f m a = forall x . 
     FreeT (m (Step f x (FreeT f m x)))
@@ -55,7 +56,20 @@ instance Monad m => Monad (FreeT f m) where
     {-# INLINE (>>) #-}
     (FreeT m ks) >>= f = FreeT m (ks >< singleton (Kleisli f))
     {-# INLINE (>>=) #-} 
-    
+
+
+instance Functor f => MFunctor (FreeT f) where
+  hoist = hoistFreeT
+
+instance Functor f => MMonad (FreeT f) where
+  embed phi = \(FreeT mstep ks) -> 
+     do step <- phi mstep
+        let ks' = maps (Kleisli . (embed phi .) . runKleisli) ks
+        case step of 
+          Stop x -> extend ks' (return x)
+          Step fx -> extend ks' (construct (fmap (embed phi) fx))
+          
+    --   of free ->  extend (maps (Kleisli . (embed phi .) . runKleisli) ks) free
 
 instance Functor f => MonadTrans (FreeT f) where
   lift = \ma -> FreeT (ma >>= return . Stop) blank

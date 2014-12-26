@@ -69,8 +69,6 @@ instance Functor f => MMonad (FreeT f) where
           Stop x -> extend ks' (return x)
           Step fx -> extend ks' (construct (fmap (embed phi) fx))
           
-    --   of free ->  extend (maps (Kleisli . (embed phi .) . runKleisli) ks) free
-
 instance Functor f => MonadTrans (FreeT f) where
   lift = \ma -> FreeT (ma >>= return . Stop) blank
   {-# INLINE lift #-}
@@ -97,12 +95,19 @@ fold construct wrap done = loop where
     ) m
 {-# INLINABLE fold #-}
 
+-- | Convert from a church-encoded version of FreeT
+
 buildFreeT :: (Functor f, Monad m) 
-           => (forall x.(f x -> x) -> (m x -> x) -> (r -> x) -> x)
+           => (forall x . (f x -> x) -> (m x -> x) -> (r -> x) -> x)
            -> FreeT f m r
 buildFreeT phi = phi construct wrap return
-     
 
+-- |  Convert to the default church encoding 
+
+foldFreeT :: (Functor f, Monad m) 
+           =>  FreeT f m r 
+           -> (forall x . (f x -> x) -> (m x -> x) -> (r -> x) -> x)
+foldFreeT free = \construct wrap done -> fold construct wrap done free
 
 
 

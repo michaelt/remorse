@@ -1,151 +1,153 @@
 {-# LANGUAGE ExistentialQuantification, GADTs, RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses, TypeFamilies #-}
+{-# LANGUAGE KindSignatures #-}
+
 module Remorse.Free where
-import Remorse.Sequence
-import Remorse.Internal
+
+import Remorse.FreeT (blank, maps, singleton, Queue)
+import Data.TASequence (TAViewL(..), (><), tviewl)
 import Control.Monad
 import Control.Applicative
 import Control.Arrow (Kleisli(..))
 import Control.Monad.Trans 
 import Control.Monad.Morph
+import qualified Data.Foldable as F
+import Data.Monoid
+import Remorse.Of
 
-data FreeT f m a = forall x . 
-    FreeT (m (Step f x (FreeT f m x)))
-          (Queue (Kleisli (FreeT f m)) x a)
+data Free f a = forall x . 
+    Free (Step f x)
+          (Queue (Kleisli (Free f)) x a)
 
-data Step f x y = Stop x | Step (f y)
+data Step f x = Stop x | Step (f (Free f x))
 
-construct :: Monad m 
-       => f (FreeT f m a) 
-       -> FreeT f m a
-construct = \f -> FreeT (return (Step f)) blank
+
+-- fold construct return = id
+construct ::  f (Free f a)  -> Free f a
+construct = \f -> Free (Step f) blank
 {-# INLINE construct #-}
 
-wrap :: (Monad m, Functor f) 
-     => m (FreeT f m a)
-     -> FreeT f m a 
-wrap = \mf -> FreeT (mf >>= next) blank
-{-# INLINE wrap #-}
-
-extend :: Queue (Kleisli (FreeT f m)) x a
-       -> FreeT f m x 
-       -> FreeT f m a
-extend t = \(FreeT h m) -> FreeT h (m >< t)
+extend :: Queue (Kleisli (Free f)) x a
+       -> Free f x 
+       -> Free f a
+extend t = \(Free h m) -> Free h (m >< t)
 {-# INLINE extend #-}
 
-next :: (Functor f, Monad m) => FreeT f m r -> m (Step f r (FreeT f m r))
-next (FreeT mstep ks) = mstep >>= \case
-  Stop x -> case uncons ks of 
-    Empty            -> return (Stop x)
-    Kleisli f :| ks' -> next (extend ks' (f x))
-  Step f             -> return (Step (fmap (extend ks) f))
-{-# INLINABLE next #-}
+kleisli :: (a -> Free f b) -> Queue (Kleisli (Free f)) a b
+kleisli = singleton . Kleisli
+{-# INLINE kleisli #-}
 
-instance Monad m => Functor (FreeT f m) where
+instance Functor (Free f) where
     {-# INLINE fmap #-}
-    fmap f  = extend (singleton (Kleisli (return . f)))
+    fmap f  = extend (kleisli (return . f))
 
-instance Monad m => Applicative (FreeT f m) where
-  pure x = FreeT (return (Stop x)) blank
+instance Applicative (Free f) where
+  pure x = Free (Stop x) blank
   (<*>) = ap
 
-instance Monad m => Monad (FreeT f m) where
-    return x = FreeT (return (Stop x)) blank
+instance Monad (Free f) where
+    return x = Free (Stop x) blank
     {-# INLINE return #-}
-    FreeT m ks >> f = FreeT m (ks >< singleton (Kleisli (\_ -> f)))
+    Free s ks >> m = Free s (ks >< kleisli (\_ -> m))
     {-# INLINE (>>) #-}
-    (FreeT m ks) >>= f = FreeT m (ks >< singleton (Kleisli f))
+    (Free s ks) >>= f = Free s (ks >< kleisli f)
     {-# INLINE (>>=) #-} 
 
+instance MFunctor Free where
+  hoist phi (Free step ks) = 
+    Free (case step of Stop r  -> Stop r
+                       Step ff -> Step (phi (liftM (hoist phi) ff))) 
+         (mapKleislis (hoist phi) ks)
 
-instance Functor f => MFunctor (FreeT f) where
-  hoist = hoistFreeT
-
-instance Functor f => MMonad (FreeT f) where
-  embed phi = \(FreeT mstep ks) -> 
-     do step <- phi mstep
-        let ks' = maps (Kleisli . (embed phi .) . runKleisli) ks
+instance MMonad Free where
+  embed phi (Free step ks) =
+     do let ks' = maps (Kleisli . (embed phi .) . runKleisli) ks
         case step of 
-          Stop x -> extend ks' (return x)
-          Step fx -> extend ks' (construct (fmap (embed phi) fx))
-          
-instance Functor f => MonadTrans (FreeT f) where
-  lift = \ma -> FreeT (ma >>= return . Stop) blank
+          Stop x -> Free (Stop x) ks' 
+          Step mx -> extend ks' (phi mx >>= embed phi) 
+
+instance MonadTrans Free where
+  lift ma = Free (Step (liftM return ma)) blank
   {-# INLINE lift #-}
   
-instance (Functor f, MonadIO m) => MonadIO (FreeT f m) where
-  liftIO  = wrap . liftM return . liftIO 
+instance (MonadIO m) => MonadIO (Free m) where
+  liftIO  = construct . liftM return . liftIO 
 
-fold :: (Functor f, Monad m) 
+
+expose :: (Functor f) => Free f r -> Step f r 
+expose (Free step ks) = case step of
+  Stop x -> case tviewl ks of 
+    TAEmptyL         -> Stop x
+    Kleisli f :< ks' -> expose (extend ks' (f x))
+  Step f             -> Step (fmap (extend ks) f)
+{-# INLINABLE expose #-}
+
+uncons :: Functor f => Free f r -> Either r (f (Free f r))
+uncons = freeMap Left Right
+
+exposed :: (Functor f) => Free f r -> Free f (Either r (f (Free f r)))
+exposed (Free step ks) = case step of
+  Stop x -> case tviewl ks of 
+    TAEmptyL         -> Free (Stop (Left x)) blank
+    Kleisli f :< ks' -> exposed (extend ks' (f x))
+  Step f             -> Free (Stop (Right (fmap (extend ks) f))) blank
+{-# INLINABLE exposed #-}
+
+
+fold :: (Functor f) 
      => (f x -> x)
-     -> (m x -> x)
      -> (a -> x)
-     -> FreeT f m a 
+     -> Free f a 
      -> x
-fold construct wrap done = loop where
-  loop (FreeT m ks) = wrap $ 
-    liftM 
-    (\case 
-        Stop o    -> case uncons ks of 
-          Empty            -> done o
-          Kleisli f :| ks' -> loop (extend ks' (f o))
-        Step ffo -> case uncons ks of 
-          Empty         -> construct (fmap loop ffo)
-          _             -> construct (fmap (loop . extend ks) ffo)
-    ) m
-{-# INLINABLE fold #-}
-
--- | Convert from a church-encoded version of FreeT
-
-buildFreeT :: (Functor f, Monad m) 
-           => (forall x . (f x -> x) -> (m x -> x) -> (r -> x) -> x)
-           -> FreeT f m r
-buildFreeT phi = phi construct wrap return
-
--- |  Convert to the default church encoding 
-
-foldFreeT :: (Functor f, Monad m) 
-           =>  FreeT f m r 
-           -> (forall x . (f x -> x) -> (m x -> x) -> (r -> x) -> x)
-foldFreeT free = \construct wrap done -> fold construct wrap done free
+fold construct done  = freeMap done (construct . (fmap (fold construct done)))
 
 
+-- | Convert from a church-encoded version of Free
+buildFree :: (Functor f) 
+           => (forall x . (f x -> x) -> (r -> x) -> x)
+           -> Free f r
+buildFree phi = phi construct return
 
-iterT ::  (Functor f, Monad m) 
-      => (f (m a) -> m a) -> FreeT f m a -> m a
-iterT phi = fold phi join return
+-- |  Convert to the default church encoding  
+foldFree :: Functor f
+         =>  Free f r 
+         -> (forall x . (f x -> x) -> (r -> x) -> x)
+foldFree free op out = fold op out free 
+{-# INLINE foldFree #-}
 
-iterTM :: (Functor f, Monad m, MonadTrans t, Monad (t m)) 
-       =>  (f (t m a) -> t m a) -> FreeT f m a -> t m a
-iterTM phi = fold phi (join . lift) (lift . return)
+-- rules :  foldFree (buildFree psi) = id
 
-hoistFreeT :: (Monad m, Functor f) 
-           => (forall x. m x -> n x) 
-           -> FreeT f m a -> FreeT f n a
-hoistFreeT phi (FreeT mstep ks) = FreeT 
-  (phi $ liftM (\case Stop r  -> Stop r
-                      Step ff -> Step (fmap (hoistFreeT phi) ff))
-               mstep)
-  (maps (\(Kleisli f) -> Kleisli (hoistFreeT phi . f)) ks)
-{-# INLINABLE hoistFreeT #-}
+-- from extensible effects 
+freeMap :: Functor f
+             => (a -> t) -- ^ function to be applied if value is Pure
+             -> (f (Free f a) -> t) -- ^ function to be applied on Impure value
+             -> Free f a -- ^ Free value to be mapped over
+             -> t -- ^ result
+freeMap f g mx = case expose mx of
+  Stop x -> f x
+  Step u -> g u
+{-# INLINE freeMap #-}
 
-transFreeT :: (Monad m, Functor f) 
+mapKleislis :: (forall x . Free f x -> Free g x)
+            -> Queue (Kleisli (Free f)) a b 
+            -> Queue (Kleisli (Free g)) a b
+mapKleislis phi = maps (\(Kleisli f)  -> Kleisli (phi . f))
+{-# INLINE mapKleislis #-}
+
+transFree :: Functor f
            => (forall x . f x -> g x) 
-           -> FreeT f m a -> FreeT g m a
-transFreeT phi (FreeT mstep ks) = FreeT 
-   (liftM (\case Stop r  -> Stop r
-                 Step ff -> Step (phi $ fmap (transFreeT phi) ff)) 
-          mstep)
-   (maps (\(Kleisli f)  -> Kleisli (transFreeT phi . f)) 
-         ks)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
-{-# INLINABLE transFreeT #-}
+           -> (forall a . Free f a -> Free g a)
+transFree phi (Free step ks) = Free 
+   (case step of Stop r  -> Stop r
+                 Step ff -> Step (phi (fmap (transFree phi) ff)) ) 
+   (mapKleislis (transFree phi) ks)                                                 
+{-# INLINABLE transFree #-}
 
-enlist :: Monad m => [a] -> FreeT ((,) a) m ()
-enlist [] = return ()
-enlist (a:as) = construct (a,enlist as)
 
-printer :: Show a => FreeT ((,) a) IO () -> IO ()
-printer = fold (\(a,io) -> print a >> io) join return
--- cutoff ::
---   (Functor f, Monad m) =>
---   Integer -> FreeT f m a -> FreeT f m (Maybe a)
+freeList :: [a] -> Free ((,) a) ()
+freeList xs = buildFree (phi xs) where
+  phi xs = \op out -> foldr (curry op) (out ()) xs
+
+unFreeList :: Free ((,) a) r -> [a]
+unFreeList = fold (uncurry (:)) (const [])

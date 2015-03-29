@@ -1,19 +1,48 @@
 {-# LANGUAGE RankNTypes, ScopedTypeVariables, BangPatterns, DeriveFunctor #-}
 {-# LANGUAGE GADTs #-}
 
-module Remorse.Prelude where
+module Remorse.FreeT.Prelude 
+  ( Of (..)
+  , break 
+  , break_ 
+  , chunksOf 
+  , concats 
+  , drop 
+  , dropWhile 
+  , filter 
+  , filterM 
+  , for 
+  , iterate 
+  , iterateM 
+  , map 
+  , mapM 
+  , prefor 
+  , repeat 
+  , repeatM 
+  , replicate 
+  , replicateM 
+  , scanr 
+  , span 
+  , span_ 
+  , splitAt 
+  , sum 
+  , sum_ 
+  , take 
+  , takeWhile 
+  , unf 
+  , yield
+   ) where
 
-import Remorse.Free
-import Remorse.Sequence
-import Control.Monad hiding (mapM)
+import Remorse.FreeT
+import Control.Monad hiding (mapM,replicateM,filterM)
 import Control.Monad.Trans
 import Prelude hiding (map, filter, drop, take, sum
                       , iterate, repeat, replicate, splitAt
-                      , takeWhile, enumFrom, enumFromTo, span, mapM, break)
+                      , takeWhile, enumFrom, enumFromTo, span
+                      , mapM, break, scanr, dropWhile)
 import qualified Prelude as P
 import Control.Arrow (Kleisli(..))
-
-data Of a b = !a :> b deriving (Show, Eq, Ord, Functor)
+import Remorse.Of
 
 yield :: Monad m => a -> FreeT (Of a) m ()
 yield a = FreeT (return (Step (a :> return ()))) blank
@@ -25,6 +54,7 @@ prefor :: (Monad m, Functor g, Functor f)
        -> FreeT f m r
 prefor phi = concats . transFreeT phi
 
+
 for free f = prefor (\(a :> x) -> f a >> return x) free
 
 -- ---------------
@@ -35,8 +65,8 @@ sum = loop 0 where
   loop n free = do 
     step <- next free
     case step of 
-      Stop _ -> return $! n
-      Step (a :> rest) -> let s = n + a in s `seq` loop (n+a) rest
+      Stop _ -> return n
+      Step (a :> rest) -> loop (n+a) rest
 {-# INLINABLE sum #-}
 
 --
@@ -53,10 +83,10 @@ sum_ d = fold (\(a :> f) -> f >=> return . (+a) )
 -- ---------------
 
 replicate :: (Monad m) => Int -> a -> FreeT (Of a) m ()
-replicate n  = take n . repeat -- loop n where
-  -- loop 0 = return ()
-  -- loop m = do yield a
-  --             loop (m-1)
+replicate n a  = loop n where -- take n . repeat -- loop n where
+  loop 0 = return ()
+  loop m = do yield a
+              loop (m-1)
 {-# INLINABLE replicate #-}
 
 
@@ -251,8 +281,7 @@ mapM f (FreeT mstep ks) =
              b <- f a
              return (Step (b :> mapM f rest))
       )
-     (maps (Kleisli . (mapM f .) . runKleisli) 
-           ks)
+     (mapKleislis (mapM f) ks)
 {-# INLINABLE mapM #-}
 
 
@@ -274,8 +303,14 @@ chunksOf = undefined
 
 splitAt :: Monad m => Int -> FreeT (Of a) m r 
       -> FreeT (Of a) m (FreeT (Of a) m r)
-splitAt = undefined
---
+splitAt n = loop n where
+    loop 0 p = return p
+    loop m p = do e <- lift (next p)
+                  case e of 
+                    Stop r -> return (return r)
+                    Step (a:>p') -> loop (m-1) p
+{-# INLINABLE splitAt #-}
+
 
 unf :: (Functor f, Monad m)
        => (a -> m (Either r (f a))) -> a -> FreeT f m r
